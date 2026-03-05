@@ -1,1 +1,0 @@
-Hello, Mars! This is a test file for DS-FTP protocol transfer.
