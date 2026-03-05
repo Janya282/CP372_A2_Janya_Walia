@@ -163,7 +163,6 @@ public class Receiver {
         byte[] bytes = ack.toBytes();
         DatagramPacket dp = new DatagramPacket(bytes, bytes.length, senderIp, senderAckPort);
         sock.send(dp);
-
         System.out.println("[Receiver] ACK sent, Seq=" + ackSeq);
     }
 
