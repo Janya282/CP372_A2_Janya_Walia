@@ -36,21 +36,31 @@ public class Sender {
 
         InetAddress rcvIp = InetAddress.getByName(rcvIpStr);
 
+        System.out.println("[Sender] Mode: " + (isGBN ? "Go-Back-N (window=" + windowSize + ")" : "Stop-and-Wait"));
+        System.out.println("[Sender] Target: " + rcvIpStr + ":" + rcvDataPort);
+        System.out.println("[Sender] ACK port: " + senderAckPort);
+        System.out.println("[Sender] Timeout: " + timeoutMs + " ms");
+
         try (DatagramSocket ackSocket = new DatagramSocket(senderAckPort)) {
             ackSocket.setSoTimeout(timeoutMs);
 
-
             long startNano = System.nanoTime();
 
+            // Phase 1: Handshake
+            System.out.println("[Sender] Sending SOT, Seq=0");
             DSPacket sot = new DSPacket(DSPacket.TYPE_SOT, 0, null);
             if (!sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, sot, 0)) {
-
                 return;
             }
+            System.out.println("[Sender] Handshake complete.");
 
+            // Read file
             byte[] fileBytes = readAllBytes(inputFile);
+            System.out.println("[Sender] File size: " + fileBytes.length + " bytes");
 
+            // Empty file case
             if (fileBytes.length == 0) {
+                System.out.println("[Sender] Empty file, sending EOT with Seq=1");
                 DSPacket eot = new DSPacket(DSPacket.TYPE_EOT, 1, null);
                 if (!sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, eot, 1)) return;
 
@@ -59,23 +69,29 @@ public class Sender {
                 return;
             }
 
-
+            // Phase 2: Data Transfer
             List<DSPacket> dataPackets = buildDataPackets(fileBytes);
 
-            int lastDataAbs = dataPackets.size();         
-            1..K
+            int lastDataAbs = dataPackets.size();
             int eotSeq = (lastDataAbs + 1) % MOD;
             DSPacket eot = new DSPacket(DSPacket.TYPE_EOT, eotSeq, null);
 
+            System.out.println("[Sender] Total DATA packets: " + dataPackets.size());
+
             if (!isGBN) {
+                // Stop-and-Wait
                 int seq = 1;
                 for (DSPacket p : dataPackets) {
+                    System.out.println("[Sender] Sending DATA, Seq=" + (seq % MOD));
                     if (!sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, p, seq % MOD)) return;
                     seq++;
                 }
+                // Phase 3: Teardown
+                System.out.println("[Sender] Sending EOT, Seq=" + eotSeq);
                 if (!sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, eot, eotSeq)) return;
 
             } else {
+                // Go-Back-N
                 if (!sendGBN(ackSocket, rcvIp, rcvDataPort, dataPackets, eot, windowSize)) return;
             }
 
@@ -84,6 +100,9 @@ public class Sender {
         }
     }
 
+    // ---------------------------------------------------------------
+    //  Go-Back-N sender logic
+    // ---------------------------------------------------------------
     private static boolean sendGBN(
             DatagramSocket ackSocket,
             InetAddress rcvIp,
@@ -93,18 +112,19 @@ public class Sender {
             int windowSize
     ) throws Exception {
 
-        int totalData = dataPackets.size();    
-        int baseAbs = 1;                      
-        int nextAbs = 1;                      
+        int totalData = dataPackets.size();
+        int baseAbs = 1;
+        int nextAbs = 1;
 
         int consecutiveTimeoutsOnBase = 0;
 
         while (baseAbs <= totalData) {
+            // Send packets within the window
             while (nextAbs <= totalData && nextAbs < baseAbs + windowSize) {
                 int windowEnd = Math.min(totalData, baseAbs + windowSize - 1);
                 int sendStart = nextAbs;
                 int sendEnd = windowEnd;
-permutation.
+                // Send with out-of-order permutation
                 sendPermutedGroups(ackSocket, rcvIp, rcvDataPort, dataPackets, sendStart, sendEnd);
                 nextAbs = sendEnd + 1;
             }
@@ -115,36 +135,47 @@ permutation.
                 if (ack == null) continue;
                 if (ack.getType() != DSPacket.TYPE_ACK) continue;
 
-                int ackSeq = ack.getSeqNum(); 
+                int ackSeq = ack.getSeqNum();
                 int ackAbs = mapAckToAbsolute(ackSeq, baseAbs - 1);
 
                 if (ackAbs > totalData) ackAbs = totalData;
 
                 if (ackAbs >= baseAbs) {
+                    System.out.println("[Sender] ACK received, Seq=" + ackSeq + " (advances base to " + (ackAbs + 1) + ")");
                     baseAbs = ackAbs + 1;
                     consecutiveTimeoutsOnBase = 0;
+                } else {
+                    System.out.println("[Sender] ACK received, Seq=" + ackSeq + " (does not advance window)");
                 }
-     
 
             } catch (SocketTimeoutException ste) {
                 consecutiveTimeoutsOnBase++;
+                System.out.println("[Sender] Timeout #" + consecutiveTimeoutsOnBase + " for base Seq=" + (baseAbs % MOD));
 
                 if (consecutiveTimeoutsOnBase >= 3) {
                     System.out.println("Unable to transfer file.");
                     return false;
                 }
 
+                // Retransmit window from base
                 int retransEnd = Math.min(totalData, baseAbs + windowSize - 1);
                 int sentEnd = Math.min(retransEnd, nextAbs - 1);
                 if (sentEnd >= baseAbs) {
+                    System.out.println("[Sender] Retransmitting packets " + (baseAbs % MOD) + " to " + (sentEnd % MOD));
                     sendPermutedGroups(ackSocket, rcvIp, rcvDataPort, dataPackets, baseAbs, sentEnd);
                 }
             }
         }
+
+        // Phase 3: Teardown
         int eotSeq = eotPacket.getSeqNum() % MOD;
+        System.out.println("[Sender] Sending EOT, Seq=" + eotSeq);
         return sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, eotPacket, eotSeq);
     }
 
+    // ---------------------------------------------------------------
+    //  Permuted group sending for GBN chaos
+    // ---------------------------------------------------------------
     private static void sendPermutedGroups(
             DatagramSocket sock,
             InetAddress rcvIp,
@@ -166,6 +197,7 @@ permutation.
             List<DSPacket> toSend = ChaosEngine.permutePackets(group);
 
             for (DSPacket p : toSend) {
+                System.out.println("[Sender] Sending DATA, Seq=" + p.getSeqNum());
                 sendPacket(sock, rcvIp, rcvDataPort, p);
             }
 
@@ -173,6 +205,9 @@ permutation.
         }
     }
 
+    // ---------------------------------------------------------------
+    //  Stop-and-Wait: send + await exact ACK with 3-timeout rule
+    // ---------------------------------------------------------------
     private static boolean sendAndAwaitExactAck(
             DatagramSocket sock,
             InetAddress rcvIp,
@@ -193,26 +228,35 @@ permutation.
 
                 int ackSeq = ack.getSeqNum() % MOD;
                 if (ackSeq == (expectedAckSeq % MOD)) {
+                    System.out.println("[Sender] ACK received, Seq=" + ackSeq);
                     return true;
                 }
                 // else ignore unrelated ACK
 
             } catch (SocketTimeoutException ste) {
                 consecutiveTimeouts++;
+                System.out.println("[Sender] Timeout #" + consecutiveTimeouts + " waiting for ACK Seq=" + (expectedAckSeq % MOD));
                 if (consecutiveTimeouts >= 3) {
                     System.out.println("Unable to transfer file.");
                     return false;
                 }
+                System.out.println("[Sender] Retransmitting...");
             }
         }
     }
 
+    // ---------------------------------------------------------------
+    //  Utility: send a single packet
+    // ---------------------------------------------------------------
     private static void sendPacket(DatagramSocket sock, InetAddress ip, int port, DSPacket p) throws Exception {
         byte[] bytes = p.toBytes();
         DatagramPacket dp = new DatagramPacket(bytes, bytes.length, ip, port);
         sock.send(dp);
     }
 
+    // ---------------------------------------------------------------
+    //  Utility: receive ACK packet
+    // ---------------------------------------------------------------
     private static DSPacket receiveAck(DatagramSocket sock) throws Exception {
         byte[] buf = new byte[DSPacket.MAX_PACKET_SIZE];
         DatagramPacket dp = new DatagramPacket(buf, buf.length);
@@ -220,6 +264,9 @@ permutation.
         return new DSPacket(dp.getData());
     }
 
+    // ---------------------------------------------------------------
+    //  Build DATA packets from file bytes
+    // ---------------------------------------------------------------
     private static List<DSPacket> buildDataPackets(byte[] bytes) {
         List<DSPacket> packets = new ArrayList<>();
         int offset = 0;
@@ -239,6 +286,9 @@ permutation.
         return packets;
     }
 
+    // ---------------------------------------------------------------
+    //  Read entire file as byte array
+    // ---------------------------------------------------------------
     private static byte[] readAllBytes(String path) throws Exception {
         File f = new File(path);
         long len = f.length();
@@ -259,6 +309,10 @@ permutation.
         }
         return out;
     }
+
+    // ---------------------------------------------------------------
+    //  Map modular ACK seq to absolute index (handles wrap-around)
+    // ---------------------------------------------------------------
     private static int mapAckToAbsolute(int ackSeqMod, int anchorAbs) {
         int anchorMod = mod(anchorAbs, MOD);
         int delta = mod(ackSeqMod - anchorMod, MOD);
