@@ -1,24 +1,20 @@
-
----
-
-## 2) Paste this into `Receiver/Receiver.java` (Stop-and-Wait receiver + RN ACK drops)
-
-```java
 import java.io.FileOutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.util.HashMap;
+import java.util.Map;
 
 public class Receiver {
 
-    private static void usageAndExit() {
-        System.out.println("Usage:");
-        System.out.println("  java Receiver <sender_ip> <sender_ack_port> <rcv_data_port> <output_file> <RN>");
-        System.exit(1);
-    }
+    private static final int MOD = 128;
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 5) usageAndExit();
+        if (args.length != 5) {
+            System.err.println("Usage:");
+            System.err.println("  java Receiver <sender_ip> <sender_ack_port> <rcv_data_port> <output_file> <RN>");
+            return;
+        }
 
         InetAddress senderIp = InetAddress.getByName(args[0]);
         int senderAckPort = Integer.parseInt(args[1]);
@@ -26,115 +22,134 @@ public class Receiver {
         String outputFile = args[3];
         int rn = Integer.parseInt(args[4]);
 
-        int ackCount = 0;
+        int ackCountIntended = 0;
 
-        try (DatagramSocket sock = new DatagramSocket(rcvDataPort);
+        boolean handshakeDone = false;
+
+        int expectedAbs = 1;
+
+        Map<Integer, byte[]> buffer = new HashMap<>();
+
+        Integer pendingEotAbs = null;
+
+        try (DatagramSocket dataSocket = new DatagramSocket(rcvDataPort);
              FileOutputStream fos = new FileOutputStream(outputFile)) {
 
-            System.out.println("Receiver listening on port " + rcvDataPort);
-
-            int expectedSeq = 0;     // expect SOT first (Seq 0) :contentReference[oaicite:20]{index=20}
-            int lastInOrder = 127;   // (expectedSeq - 1) mod 128 when expectedSeq=0
-
-            boolean connected = false;
-
             while (true) {
-      :contentReference[oaicite:21]{index=21}byte[DSPacket.MAX_PACKET_SIZE];
-                DatagramPacket dpIn = new DatagramPacket(inBuf, inBuf.length);
-                sock.receive(dpIn);
-
-                DSPacket pkt;
-                try {
-                    pkt = new DSPacket(dpIn.getData());
-                } catch (IllegalArgumentException e) {
-                    // Bad packet length field => ignore
-                    continue;
-                }
+                DSPacket pkt = receivePacket(dataSocket);
 
                 int type = pkt.getType();
-                int seq = pkt.getSeqNum();
+                int seq = pkt.getSeqNum() % MOD;
 
-                System.out.printf("RECV type=%d seq=%d len=%d%n", type, seq, pkt.getLength());
-
-                // -------------------------
-                // Handshake: SOT
-                // -------------------------
-                if (!connected) {
+                if (!handshakeDone) {
                     if (type == DSPacket.TYPE_SOT && seq == 0) {
-                        // ACK SOT seq 0
-                        maybeSendAck(sock, senderIp, senderAckPort, 0, rn, ++ackCount);
-                        connected = true;
-                        expectedSeq = 1;
-                        lastInOrder = 0;
-                        System.out.println("Handshake complete.");
+                        ackCountIntended++;
+                        maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, 0);
+                        handshakeDone = true;
+
+                        expectedAbs = 1;
+                        buffer.clear();
+                        pendingEotAbs = null;
                     } else {
-                        // Ignore anything until SOT
-                        System.out.println("Ignoring until SOT...");
                     }
                     continue;
                 }
 
-                // -------------------------
-                // DATA packets
-                // -------------------------
+                int lastDeliveredSeq = mod(expectedAbs - 1, MOD);
+
                 if (type == DSPacket.TYPE_DATA) {
-                    if (seq == expectedSeq) {
-                        // In-order: write, ACK, advance expectedSeq :contentReference[oaicite:22]{index=22}
-                        fos.write(pkt.getPayload());
-                        maybeSendAck(sock, senderIp, senderAckPort, seq, rn, ++ackCount);
+                    int abs = mapSeqToAbsolute(seq, expectedAbs);
 
-               :contentReference[oaicite:23]{index=23}                       expectedSeq = (expectedSeq + 1) % 128;
+                    if (abs >= expectedAbs && abs < expectedAbs + 128) {
+                        if (!buffer.containsKey(abs)) {
+                            buffer.put(abs, pkt.getPayload());
+                        }
+
+                        while (buffer.containsKey(expectedAbs)) {
+                            byte[] payload = buffer.remove(expectedAbs);
+                            fos.write(payload);
+                            expectedAbs++;
+                        }
+
+                        if (pendingEotAbs != null && pendingEotAbs == expectedAbs) {
+                            int eotSeq = mod(expectedAbs, MOD);
+                            ackCountIntended++;
+                            maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, eotSeq);
+                            break;
+                        }
+
+                        lastDeliveredSeq = mod(expectedAbs - 1, MOD);
+                        ackCountIntended++;
+                        maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, lastDeliveredSeq);
+
                     } else {
-                        // Duplicate/out-of-order: do NOT write; resend ACK for last in-order :contentReference[oaicite:24]{index=24}
-                        System.out.printf("Out-of-order. expected=%d, got=%d. Re-ACK last=%d%n",
-                                expectedSeq, seq, lastInOrder):contentReference[oaicite:25]{index=25}ybeSendAck(sock, senderIp, senderAckPort, lastInOrder, rn, ++ackCount);
+                        ackCountIntended++;
+                        maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, lastDeliveredSeq);
                     }
-                    continue;
-                }
 
-                // -------------------------
-                // Teardown: EOT
-                // EOT seq should equal expectedSeq when all DATA received :contentReference[oaicite:26]{index=26}
-                // -------------------------
-                if (type == DSPacket.TYPE_EOT) {
-                    if (seq == expectedSeq) {
-                   :contentReference[oaicite:27]{index=27}rIp, senderAckPort, seq, rn, ++ackCount);
-                        System.out.println("EOT received. Closing.");
+                } else if (type == DSPacket.TYPE_EOT) {
+                    int eotAbs = mapSeqToAbsolute(seq, expectedAbs);
+
+                    if (eotAbs == expectedAbs) {
+                        ackCountIntended++;
+                        maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, seq);
                         break;
-                    } else {
-                        System.out.printf("EOT out-of-order. expected=%d got=%d. Re-ACK last=%d%n",
-                                expectedSeq, seq, lastInOrder);
-                        maybeSendAck(sock, senderIp, senderAckPort, lastInOrder, rn, ++ackCount);
-                    }
-                    continue;
-                }
+                    } else if (eotAbs > expectedAbs && eotAbs < expectedAbs + 128) {
+                        pendingEotAbs = eotAbs;
 
-                // If we get ACK packets here, ignore (receiver doesn't need them)
+                        ackCountIntended++;
+                        maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, lastDeliveredSeq);
+                    } else {
+                        ackCountIntended++;
+                        maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, lastDeliveredSeq);
+                    }
+
+                } else if (type == DSPacket.TYPE_SOT) {
+
+                    ackCountIntended++;
+                    maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, 0);
+
+                } else {
+                }
             }
         }
     }
 
-    /**
-     * Receiver must simulate ACK loss using ChaosEngine.shouldDrop(ackCount, RN). :contentReference[oaicite:28]{index=28}
-     */
+    private static DSPacket receivePacket(DatagramSocket sock) throws Exception {
+        byte[] buf = new byte[DSPacket.MAX_PACKET_SIZE];
+        DatagramPacket dp = new DatagramPacket(buf, buf.length);
+        sock.receive(dp);
+        return new DSPacket(dp.getData());
+    }
+
     private static void maybeSendAck(
             DatagramSocket sock,
             InetAddress senderIp,
             int senderAckPort,
-            int:contentReference[oaicite:29]{index=29}         int ackCount
+            int ackCountIntended,
+            int rn,
+            int ackSeq
     ) throws Exception {
 
-        boolean drop = ChaosEngine.shouldDrop(ackCount, rn);
-        if (drop) {
-            System.out.printf("DROP ACK seq=%d (ackCount=%d rn=%d)%n", seq, ackCount, rn);
+        if (ChaosEngine.shouldDrop(ackCountIntended, rn)) {
             return;
         }
 
-        DSPacket ack = new DSPacket(DSPacket.TYPE_ACK, seq, null);
-        byte[] out = ack.toBytes();
-        DatagramPacket dpOut = new DatagramPacket(out, out.length, senderIp, senderAckPort);
-        sock.send(dpOut);
+        DSPacket ack = new DSPacket(DSPacket.TYPE_ACK, ackSeq, null);
+        byte[] bytes = ack.toBytes();
+        DatagramPacket dp = new DatagramPacket(bytes, bytes.length, senderIp, senderAckPort);
+        sock.send(dp);
 
-        System.out.printf("SEND ACK seq=%d (ackCount=%d)%n", seq, ackCount);
+    }
+
+    private static int mapSeqToAbsolute(int seqMod, int expectedAbs) {
+        int expectedMod = mod(expectedAbs, MOD);
+        int delta = mod(seqMod - expectedMod, MOD);
+        return expectedAbs + delta;
+    }
+
+    private static int mod(int x, int m) {
+        int r = x % m;
+        return (r < 0) ? (r + m) : r;
     }
 }
