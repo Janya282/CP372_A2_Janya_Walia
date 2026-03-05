@@ -45,7 +45,6 @@ public class Receiver {
                 int type = pkt.getType();
                 int seq = pkt.getSeqNum() % MOD;
 
-                // Phase 1: Handshake
                 if (!handshakeDone) {
                     if (type == DSPacket.TYPE_SOT && seq == 0) {
                         System.out.println("[Receiver] SOT received, Seq=0");
@@ -65,12 +64,10 @@ public class Receiver {
 
                 int lastDeliveredSeq = mod(expectedAbs - 1, MOD);
 
-                // Phase 2: Data Transfer
                 if (type == DSPacket.TYPE_DATA) {
                     int abs = mapSeqToAbsolute(seq, expectedAbs);
 
                     if (abs >= expectedAbs && abs < expectedAbs + 128) {
-                        // Within receive window
                         if (!buffer.containsKey(abs)) {
                             buffer.put(abs, pkt.getPayload());
                             System.out.println("[Receiver] DATA received, Seq=" + seq + " (buffered, abs=" + abs + ")");
@@ -79,7 +76,6 @@ public class Receiver {
                                     .println("[Receiver] DATA received, Seq=" + seq + " (duplicate, already buffered)");
                         }
 
-                        // Deliver in order
                         while (buffer.containsKey(expectedAbs)) {
                             byte[] payload = buffer.remove(expectedAbs);
                             fos.write(payload);
@@ -88,7 +84,6 @@ public class Receiver {
                             expectedAbs++;
                         }
 
-                        // Check if we can now deliver a pending EOT
                         if (pendingEotAbs != null && pendingEotAbs == expectedAbs) {
                             int eotSeq = mod(expectedAbs, MOD);
                             ackCountIntended++;
@@ -103,7 +98,6 @@ public class Receiver {
                         maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, lastDeliveredSeq);
 
                     } else {
-                        // Outside window
                         System.out.println("[Receiver] DATA received, Seq=" + seq + " (outside window, discarding)");
                         ackCountIntended++;
                         maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, lastDeliveredSeq);
@@ -113,13 +107,11 @@ public class Receiver {
                     int eotAbs = mapSeqToAbsolute(seq, expectedAbs);
 
                     if (eotAbs == expectedAbs) {
-                        // All data delivered, ACK EOT immediately
                         System.out.println("[Receiver] EOT received, Seq=" + seq + " — all data already delivered");
                         ackCountIntended++;
                         maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, seq);
                         break;
                     } else if (eotAbs > expectedAbs && eotAbs < expectedAbs + 128) {
-                        // EOT arrived early, store it
                         pendingEotAbs = eotAbs;
                         System.out
                                 .println("[Receiver] EOT received early, Seq=" + seq + " (waiting for remaining data)");
@@ -133,7 +125,6 @@ public class Receiver {
                     }
 
                 } else if (type == DSPacket.TYPE_SOT) {
-                    // Duplicate SOT after handshake (retransmission)
                     System.out.println("[Receiver] Duplicate SOT received, re-ACKing Seq=0");
                     ackCountIntended++;
                     maybeSendAck(dataSocket, senderIp, senderAckPort, ackCountIntended, rn, 0);
@@ -147,9 +138,6 @@ public class Receiver {
         }
     }
 
-    // ---------------------------------------------------------------
-    // Receive a single packet from the socket
-    // ---------------------------------------------------------------
     private static DSPacket receivePacket(DatagramSocket sock) throws Exception {
         byte[] buf = new byte[DSPacket.MAX_PACKET_SIZE];
         DatagramPacket dp = new DatagramPacket(buf, buf.length);
@@ -157,9 +145,6 @@ public class Receiver {
         return new DSPacket(dp.getData());
     }
 
-    // ---------------------------------------------------------------
-    // Conditionally send ACK (respects ChaosEngine drop rules)
-    // ---------------------------------------------------------------
     private static void maybeSendAck(
             DatagramSocket sock,
             InetAddress senderIp,
@@ -182,9 +167,6 @@ public class Receiver {
         System.out.println("[Receiver] ACK sent, Seq=" + ackSeq);
     }
 
-    // ---------------------------------------------------------------
-    // Map modular sequence to absolute index (handles wrap-around)
-    // ---------------------------------------------------------------
     private static int mapSeqToAbsolute(int seqMod, int expectedAbs) {
         int expectedMod = mod(expectedAbs, MOD);
         int delta = mod(seqMod - expectedMod, MOD);
