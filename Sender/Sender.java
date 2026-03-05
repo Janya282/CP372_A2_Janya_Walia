@@ -14,7 +14,8 @@ public class Sender {
     public static void main(String[] args) throws Exception {
         if (args.length != 5 && args.length != 6) {
             System.err.println("Usage:");
-            System.err.println("  java Sender <rcv_ip> <rcv_data_port> <sender_ack_port> <input_file> <timeout_ms> [window_size]");
+            System.err.println(
+                    "  java Sender <rcv_ip> <rcv_data_port> <sender_ack_port> <input_file> <timeout_ms> [window_size]");
             return;
         }
 
@@ -46,7 +47,6 @@ public class Sender {
 
             long startNano = System.nanoTime();
 
-            // Phase 1: Handshake
             System.out.println("[Sender] Sending SOT, Seq=0");
             DSPacket sot = new DSPacket(DSPacket.TYPE_SOT, 0, null);
             if (!sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, sot, 0)) {
@@ -54,22 +54,20 @@ public class Sender {
             }
             System.out.println("[Sender] Handshake complete.");
 
-            // Read file
             byte[] fileBytes = readAllBytes(inputFile);
             System.out.println("[Sender] File size: " + fileBytes.length + " bytes");
 
-            // Empty file case
             if (fileBytes.length == 0) {
                 System.out.println("[Sender] Empty file, sending EOT with Seq=1");
                 DSPacket eot = new DSPacket(DSPacket.TYPE_EOT, 1, null);
-                if (!sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, eot, 1)) return;
+                if (!sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, eot, 1))
+                    return;
 
                 double seconds = (System.nanoTime() - startNano) / 1_000_000_000.0;
                 System.out.printf("Total Transmission Time: %.2f seconds%n", seconds);
                 return;
             }
 
-            // Phase 2: Data Transfer
             List<DSPacket> dataPackets = buildDataPackets(fileBytes);
 
             int lastDataAbs = dataPackets.size();
@@ -79,20 +77,20 @@ public class Sender {
             System.out.println("[Sender] Total DATA packets: " + dataPackets.size());
 
             if (!isGBN) {
-                // Stop-and-Wait
                 int seq = 1;
                 for (DSPacket p : dataPackets) {
                     System.out.println("[Sender] Sending DATA, Seq=" + (seq % MOD));
-                    if (!sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, p, seq % MOD)) return;
+                    if (!sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, p, seq % MOD))
+                        return;
                     seq++;
                 }
-                // Phase 3: Teardown
                 System.out.println("[Sender] Sending EOT, Seq=" + eotSeq);
-                if (!sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, eot, eotSeq)) return;
+                if (!sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, eot, eotSeq))
+                    return;
 
             } else {
-                // Go-Back-N
-                if (!sendGBN(ackSocket, rcvIp, rcvDataPort, dataPackets, eot, windowSize)) return;
+                if (!sendGBN(ackSocket, rcvIp, rcvDataPort, dataPackets, eot, windowSize))
+                    return;
             }
 
             double seconds = (System.nanoTime() - startNano) / 1_000_000_000.0;
@@ -100,17 +98,13 @@ public class Sender {
         }
     }
 
-    // ---------------------------------------------------------------
-    //  Go-Back-N sender logic
-    // ---------------------------------------------------------------
     private static boolean sendGBN(
             DatagramSocket ackSocket,
             InetAddress rcvIp,
             int rcvDataPort,
             List<DSPacket> dataPackets,
             DSPacket eotPacket,
-            int windowSize
-    ) throws Exception {
+            int windowSize) throws Exception {
 
         int totalData = dataPackets.size();
         int baseAbs = 1;
@@ -119,29 +113,30 @@ public class Sender {
         int consecutiveTimeoutsOnBase = 0;
 
         while (baseAbs <= totalData) {
-            // Send packets within the window
             while (nextAbs <= totalData && nextAbs < baseAbs + windowSize) {
                 int windowEnd = Math.min(totalData, baseAbs + windowSize - 1);
                 int sendStart = nextAbs;
                 int sendEnd = windowEnd;
-                // Send with out-of-order permutation
                 sendPermutedGroups(ackSocket, rcvIp, rcvDataPort, dataPackets, sendStart, sendEnd);
                 nextAbs = sendEnd + 1;
             }
 
-            // Wait for ACK (cumulative)
             try {
                 DSPacket ack = receiveAck(ackSocket);
-                if (ack == null) continue;
-                if (ack.getType() != DSPacket.TYPE_ACK) continue;
+                if (ack == null)
+                    continue;
+                if (ack.getType() != DSPacket.TYPE_ACK)
+                    continue;
 
                 int ackSeq = ack.getSeqNum();
                 int ackAbs = mapAckToAbsolute(ackSeq, baseAbs - 1);
 
-                if (ackAbs > totalData) ackAbs = totalData;
+                if (ackAbs > totalData)
+                    ackAbs = totalData;
 
                 if (ackAbs >= baseAbs) {
-                    System.out.println("[Sender] ACK received, Seq=" + ackSeq + " (advances base to " + (ackAbs + 1) + ")");
+                    System.out.println(
+                            "[Sender] ACK received, Seq=" + ackSeq + " (advances base to " + (ackAbs + 1) + ")");
                     baseAbs = ackAbs + 1;
                     consecutiveTimeoutsOnBase = 0;
                 } else {
@@ -150,14 +145,14 @@ public class Sender {
 
             } catch (SocketTimeoutException ste) {
                 consecutiveTimeoutsOnBase++;
-                System.out.println("[Sender] Timeout #" + consecutiveTimeoutsOnBase + " for base Seq=" + (baseAbs % MOD));
+                System.out
+                        .println("[Sender] Timeout #" + consecutiveTimeoutsOnBase + " for base Seq=" + (baseAbs % MOD));
 
                 if (consecutiveTimeoutsOnBase >= 3) {
                     System.out.println("Unable to transfer file.");
                     return false;
                 }
 
-                // Retransmit window from base
                 int retransEnd = Math.min(totalData, baseAbs + windowSize - 1);
                 int sentEnd = Math.min(retransEnd, nextAbs - 1);
                 if (sentEnd >= baseAbs) {
@@ -167,23 +162,18 @@ public class Sender {
             }
         }
 
-        // Phase 3: Teardown
         int eotSeq = eotPacket.getSeqNum() % MOD;
         System.out.println("[Sender] Sending EOT, Seq=" + eotSeq);
         return sendAndAwaitExactAck(ackSocket, rcvIp, rcvDataPort, eotPacket, eotSeq);
     }
 
-    // ---------------------------------------------------------------
-    //  Permuted group sending for GBN chaos
-    // ---------------------------------------------------------------
     private static void sendPermutedGroups(
             DatagramSocket sock,
             InetAddress rcvIp,
             int rcvDataPort,
             List<DSPacket> dataPackets,
             int absStart,
-            int absEnd
-    ) throws Exception {
+            int absEnd) throws Exception {
         int i = absStart;
         while (i <= absEnd) {
             int remaining = absEnd - i + 1;
@@ -205,16 +195,12 @@ public class Sender {
         }
     }
 
-    // ---------------------------------------------------------------
-    //  Stop-and-Wait: send + await exact ACK with 3-timeout rule
-    // ---------------------------------------------------------------
     private static boolean sendAndAwaitExactAck(
             DatagramSocket sock,
             InetAddress rcvIp,
             int rcvDataPort,
             DSPacket packet,
-            int expectedAckSeq
-    ) throws Exception {
+            int expectedAckSeq) throws Exception {
 
         int consecutiveTimeouts = 0;
 
@@ -223,19 +209,21 @@ public class Sender {
 
             try {
                 DSPacket ack = receiveAck(sock);
-                if (ack == null) continue;
-                if (ack.getType() != DSPacket.TYPE_ACK) continue;
+                if (ack == null)
+                    continue;
+                if (ack.getType() != DSPacket.TYPE_ACK)
+                    continue;
 
                 int ackSeq = ack.getSeqNum() % MOD;
                 if (ackSeq == (expectedAckSeq % MOD)) {
                     System.out.println("[Sender] ACK received, Seq=" + ackSeq);
                     return true;
                 }
-                // else ignore unrelated ACK
 
             } catch (SocketTimeoutException ste) {
                 consecutiveTimeouts++;
-                System.out.println("[Sender] Timeout #" + consecutiveTimeouts + " waiting for ACK Seq=" + (expectedAckSeq % MOD));
+                System.out.println(
+                        "[Sender] Timeout #" + consecutiveTimeouts + " waiting for ACK Seq=" + (expectedAckSeq % MOD));
                 if (consecutiveTimeouts >= 3) {
                     System.out.println("Unable to transfer file.");
                     return false;
@@ -245,18 +233,12 @@ public class Sender {
         }
     }
 
-    // ---------------------------------------------------------------
-    //  Utility: send a single packet
-    // ---------------------------------------------------------------
     private static void sendPacket(DatagramSocket sock, InetAddress ip, int port, DSPacket p) throws Exception {
         byte[] bytes = p.toBytes();
         DatagramPacket dp = new DatagramPacket(bytes, bytes.length, ip, port);
         sock.send(dp);
     }
 
-    // ---------------------------------------------------------------
-    //  Utility: receive ACK packet
-    // ---------------------------------------------------------------
     private static DSPacket receiveAck(DatagramSocket sock) throws Exception {
         byte[] buf = new byte[DSPacket.MAX_PACKET_SIZE];
         DatagramPacket dp = new DatagramPacket(buf, buf.length);
@@ -264,9 +246,6 @@ public class Sender {
         return new DSPacket(dp.getData());
     }
 
-    // ---------------------------------------------------------------
-    //  Build DATA packets from file bytes
-    // ---------------------------------------------------------------
     private static List<DSPacket> buildDataPackets(byte[] bytes) {
         List<DSPacket> packets = new ArrayList<>();
         int offset = 0;
@@ -286,13 +265,11 @@ public class Sender {
         return packets;
     }
 
-    // ---------------------------------------------------------------
-    //  Read entire file as byte array
-    // ---------------------------------------------------------------
     private static byte[] readAllBytes(String path) throws Exception {
         File f = new File(path);
         long len = f.length();
-        if (len <= 0) return new byte[0];
+        if (len <= 0)
+            return new byte[0];
 
         if (len > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("File too large for this reference implementation");
@@ -303,16 +280,14 @@ public class Sender {
             int read = 0;
             while (read < out.length) {
                 int r = fis.read(out, read, out.length - read);
-                if (r < 0) break;
+                if (r < 0)
+                    break;
                 read += r;
             }
         }
         return out;
     }
 
-    // ---------------------------------------------------------------
-    //  Map modular ACK seq to absolute index (handles wrap-around)
-    // ---------------------------------------------------------------
     private static int mapAckToAbsolute(int ackSeqMod, int anchorAbs) {
         int anchorMod = mod(anchorAbs, MOD);
         int delta = mod(ackSeqMod - anchorMod, MOD);
